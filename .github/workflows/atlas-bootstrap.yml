@@ -1,0 +1,187 @@
+name: Atlas Notion Bootstrap
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Change Log version"
+        default: "3.1"
+      date:
+        description: "ISO date"
+        default: "2025-08-26"
+      author:
+        description: "Author"
+        default: "Ruby + Collins"
+      summary:
+        description: "Change summary"
+        default: "Added Atlas Identity Core and Atlas Instruction under ATLAS NOTION. Formalized Atlas’ role in HOC Team (2.3) as Archivist & Auditor + Backup Commander. Established Atlas as a triad peer."
+      linked:
+        description: "Linked sections"
+        default: "Section 2.3; Section 8.4; ATLAS NOTION"
+      status:
+        description: "Status"
+        default: "Active"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Write requirements
+        run: |
+          cat > requirements.txt <<'TXT'
+          notion-client==2.2.1
+          python-dotenv==1.0.1
+          rich==13.7.1
+          certifi==2024.7.4
+          TXT
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Create bootstrap script
+        run: |
+          cat > atlas_notion_bootstrap.py <<'PY'
+          from __future__ import annotations
+          import os, time, argparse
+          from typing import Any, Dict, List, Optional
+          from notion_client import Client
+
+          CHANGE_LOG_NAME = "Change Log"
+          PERSISTENT_MEMORY_NAME = "Atlas Persistent Memory"
+          ATLAS_NOTION = "ATLAS NOTION"
+          RUBY_NOTION = "RUBY NOTION"
+          HOC_ACCESS = "HOC Access"
+
+          CHANGE_LOG_SCHEMA = {
+              "Version": {"name":"Version","type":"title"},
+              "Date": {"name":"Date","type":"date"},
+              "Author": {"name":"Author","type":"rich_text"},
+              "Change Summary": {"name":"Change Summary","type":"rich_text"},
+              "Linked Sections": {"name":"Linked Sections","type":"rich_text"},
+              "Status": {"name":"Status","type":"select","select":{"options":[
+                  {"name":"Proposed","color":"yellow"},
+                  {"name":"Active","color":"green"},
+                  {"name":"Archived","color":"gray"},
+              ]}},
+          }
+          MEMORY_SCHEMA = {
+              "Timestamp":{"name":"Timestamp","type":"date"},
+              "Actor":{"name":"Actor","type":"rich_text"},
+              "Event":{"name":"Event","type":"title"},
+              "Details":{"name":"Details","type":"rich_text"},
+              "Tags":{"name":"Tags","type":"multi_select"},
+          }
+
+          def env(name:str)->str:
+              v=os.getenv(name)
+              if not v: raise RuntimeError(f"Missing env var {name}")
+              return v
+
+          def client()->Client: return Client(auth=env("NOTION_TOKEN"))
+          def rtxt(s:str): return [{"type":"text","text":{"content":s}}]
+          def select(name:str): return {"name":name}
+
+          def search_exact_page(n:Client,title:str)->Optional[Dict[str,Any]]:
+              res=n.search(query=title,filter={"value":"page","property":"object"}).get("results",[])
+              for r in res:
+                  try:
+                      t=r["properties"]["title"]["title"][0]["plain_text"].strip()
+                      if t.lower()==title.lower(): return r
+                  except: pass
+              return None
+
+          def ensure_page(n:Client,title:str,parent_id:str=None)->Dict[str,Any]:
+              ex=search_exact_page(n,title)
+              if ex: return ex
+              parent={"type":"workspace"} if not parent_id else {"type":"page_id","page_id":parent_id}
+              return n.pages.create(parent=parent,properties={"title":{"title":[{"type":"text","text":{"content":title}}]}})
+
+          def search_exact_db(n:Client,title:str)->Optional[Dict[str,Any]]:
+              res=n.search(query=title,filter={"value":"database","property":"object"}).get("results",[])
+              for db in res:
+                  try:
+                      t=db["title"][0]["plain_text"].strip()
+                      if t.lower()==title.lower(): return db
+                  except: pass
+              return None
+
+          def ensure_db(n:Client,name:str,parent_page_id:str,schema:Dict[str,Any])->Dict[str,Any]:
+              ex=search_exact_db(n,name)
+              if ex: return ex
+              return n.databases.create(parent={"type":"page_id","page_id":parent_page_id},
+                                        title=[{"type":"text","text":{"content":name}}],properties=schema)
+
+          def ensure_change_log(n:Client,hoc_id:str)->Dict[str,Any]:
+              db=search_exact_db(n,CHANGE_LOG_NAME)
+              return db if db else ensure_db(n,CHANGE_LOG_NAME,hoc_id,CHANGE_LOG_SCHEMA)
+
+          def upsert_change(n:Client,db_id:str,version:str,date_iso:str,author:str,summary:str,linked:str,status:str)->None:
+              q={"filter":{"and":[{"property":"Version","title":{"equals":version}}]}}
+              res=n.databases.query(database_id=db_id,**q).get("results",[])
+              props={
+                  "Version":{"title":[{"type":"text","text":{"content":version}}]},
+                  "Date":{"date":{"start":date_iso}},
+                  "Author":{"rich_text":rtxt(author)},
+                  "Change Summary":{"rich_text":rtxt(summary)},
+                  "Linked Sections":{"rich_text":rtxt(linked)},
+                  "Status":{"select":select(status)},
+              }
+              if res: n.pages.update(page_id=res[0]["id"],properties=props)
+              else:   n.pages.create(parent={"type":"database_id","database_id":db_id},properties=props)
+
+          def ensure_memory(n:Client,atlas_id:str)->Dict[str,Any]:
+              db=search_exact_db(n,PERSISTENT_MEMORY_NAME)
+              return db if db else ensure_db(n,PERSISTENT_MEMORY_NAME,atlas_id,MEMORY_SCHEMA)
+
+          def append_memory(n:Client,db_id:str,actor:str,event:str,details:str,tags:List[str])->None:
+              n.pages.create(parent={"type":"database_id","database_id":db_id},properties={
+                  "Timestamp":{"date":{"start":time.strftime("%Y-%m-%dT%H:%M:%S")}},
+                  "Actor":{"rich_text":rtxt(actor)},
+                  "Event":{"title":[{"type":"text","text":{"content":event}}]},
+                  "Details":{"rich_text":rtxt(details)},
+                  "Tags":{"multi_select":[{"name":t} for t in tags]}
+              })
+
+          def main():
+              import argparse
+              p=argparse.ArgumentParser()
+              p.add_argument("cmd",choices=["bootstrap"])
+              p.add_argument("--v","--version",dest="version",required=True)
+              p.add_argument("--date",required=True)
+              p.add_argument("--author",required=True)
+              p.add_argument("--summary",required=True)
+              p.add_argument("--linked",required=True)
+              p.add_argument("--status",default="Active",choices=["Proposed","Active","Archived"])
+              a=p.parse_args()
+
+              n=client()
+              atlas=ensure_page(n,ATLAS_NOTION)
+              ruby =ensure_page(n,RUBY_NOTION)
+              hoc  =ensure_page(n,HOC_ACCESS)
+              chdb =ensure_change_log(n,hoc["id"])
+              upsert_change(n,chdb["id"],a.version,a.date,a.author,a.summary,a.linked,a.status)
+              memdb=ensure_memory(n,atlas["id"])
+              append_memory(n,memdb["id"],"Atlas","Bootstrap Completed",
+                            f"Ensured pages, Change Log ({a.version}), Persistent Memory.","bootstrap change-log atlas".split())
+              print("✅ Bootstrap done. Change Log and Persistent Memory are in place.")
+
+          if __name__=="__main__": main()
+          PY
+
+      - name: Run bootstrap
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_TEAMSPACE: "Kola Adeola’s Notion HQ"
+          OWNER_NAME: "Collins"
+        run: |
+          python atlas_notion_bootstrap.py bootstrap \
+            --v "${{ github.event.inputs.version }}" \
+            --date "${{ github.event.inputs.date }}" \
+            --author "${{ github.event.inputs.author }}" \
+            --summary "${{ github.event.inputs.summary }}" \
+            --linked "${{ github.event.inputs.linked }}" \
+            --status "${{ github.event.inputs.status }}"
